@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Advanced FPS Game</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        #crosshair {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            width: 20px;
+            height: 20px;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 20px;
+            pointer-events: none;
+        }
+        #score {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            color: white;
+            font-family: Arial;
+        }
+        #health {
+            position: fixed;
+            top: 50px;
+            left: 20px;
+            color: white;
+            font-family: Arial;
+        }
+        #level {
+            position: fixed;
+            top: 80px;
+            left: 20px;
+            color: white;
+            font-family: Arial;
+        }
+        #instructions {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.7);
+            padding: 20px;
+            color: white;
+            font-family: Arial;
+            text-align: center;
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div id="crosshair">+</div>
+    <div id="score">Score: 0</div>
+    <div id="health">Health: 100</div>
+    <div id="level">Level: 1</div>
+    <div id="slide">Slide Ready</div>
+    <div id="instructions">
+        Click to play<br>
+        WASD - Move<br>
+        Space - Jump<br>
+        Shift - Sprint<br>
+        C - Slide<br>
+        Mouse - Look around<br>
+        Click - Shoot<br>
+        ESC - Pause
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        let camera, scene, renderer, raycaster;
+        let moveForward = false;
+        let moveBackward = false;
+        let moveLeft = false;
+        let moveRight = false;
+        let canJump = true;
+        let isSprinting = false;
+        let isSliding = false;
+        let slideVelocity = new THREE.Vector3();
+        let slideDirection = new THREE.Vector3();
+        let slideCooldown = false;
+        let velocity = new THREE.Vector3();
+        let canShoot = true;
+        let targets = [];
+        let enemies = [];
+        let walls = [];
+        let bullets = [];
+        let enemyBullets = [];
+        let score = 0;
+        let health = 100;
+        let level = 1;
+        let paused = true;
+        let rooms = [];
+
+        // Constants
+        const GRAVITY = -0.98;
+        const JUMP_FORCE = 0.5;
+        const WALK_SPEED = 0.15;
+        const SPRINT_SPEED = 0.3;
+        const SLIDE_SPEED = 0.4;
+        const SLIDE_FRICTION = 0.95;
+        const SLIDE_COOLDOWN = 1500; // ms
+        const MAP_SIZE = 100;
+        const WALL_HEIGHT = 10;
+        const ROOM_SIZE = 20;
+        const ROOM_SPACING = 5;
+        const BULLET_SPEED = 1;
+        const BULLET_LIFETIME = 2000;
+        const ENEMY_TYPES = {
+            SHOOTER: 'shooter',
+            RUSHER: 'rusher',
+            TANK: 'tank'
+        };
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            raycaster = new THREE.Raycaster();
+            
+            renderer = new THREE.WebGLRenderer();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            // Lighting
+            const ambientLight = new THREE.AmbientLight(0x404040);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(1, 1, 1);
+            scene.add(directionalLight);
+
+            generateMap();
+            camera.position.set(0, 2, 0);
+
+            setupControls();
+            spawnInitialEntities();
+
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+            document.addEventListener('mousedown', onMouseDown);
+            document.addEventListener('click', startGame);
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function generateMap() {
+            // Create floor
+            const floorGeometry = new THREE.PlaneGeometry(MAP_SIZE, MAP_SIZE);
+            const floorMaterial = new THREE.MeshPhongMaterial({ color: 0x808080 });
+            const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+            floor.rotation.x = -Math.PI / 2;
+            floor.receiveShadow = true;
+            scene.add(floor);
+
+            // Generate interconnected rooms
+            const roomPositions = [];
+            const roomCount = 5;
+            
+            for (let i = 0; i < roomCount; i++) {
+                let position;
+                let attempts = 0;
+                do {
+                    position = new THREE.Vector2(
+                        (Math.random() - 0.5) * (MAP_SIZE - ROOM_SIZE),
+                        (Math.random() - 0.5) * (MAP_SIZE - ROOM_SIZE)
+                    );
+                    attempts++;
+                } while (isRoomOverlapping(position, roomPositions) && attempts < 100);
+
+                if (attempts < 100) {
+                    roomPositions.push(position);
+                    createRoom(position.x, position.y);
+                }
+            }
+
+            // Create corridors between rooms
+            for (let i = 0; i < roomPositions.length - 1; i++) {
+                createCorridor(roomPositions[i], roomPositions[i + 1]);
+            }
+
+            // Create outer walls
+            createBoundaryWalls();
+        }
+
+        function isRoomOverlapping(position, existingPositions) {
+            return existingPositions.some(pos => 
+                position.distanceTo(pos) < ROOM_SIZE + ROOM_SPACING
+            );
+        }
+
+        function createCorridor(start, end) {
+            const corridorWidth = 4;
+            const direction = end.clone().sub(start).normalize();
+            const distance = start.distanceTo(end);
+            
+            const corridor = new THREE.Mesh(
+                new THREE.BoxGeometry(distance, 0.1, corridorWidth),
+                new THREE.MeshPhongMaterial({ color: 0x808080 })
+            );
+
+            corridor.position.set(
+                (start.x + end.x) / 2,
+                0,
+                (start.y + end.y) / 2
+            );
+
+            corridor.rotation.y = Math.atan2(direction.y, direction.x);
+            scene.add(corridor);
+        }
+
+        function createRoom(x, z) {
+            const room = new THREE.Group();
+            room.position.set(x, 0, z);
+
+            // Room walls
+            const wallGeometry = new THREE.BoxGeometry(1, WALL_HEIGHT, ROOM_SIZE);
+            const wallMaterial = new THREE.MeshPhongMaterial({ color: 0x808080 });
+
+            const walls = [
+                createWall(-ROOM_SIZE/2, WALL_HEIGHT/2, 0, 1, WALL_HEIGHT, ROOM_SIZE),
+                createWall(ROOM_SIZE/2, WALL_HEIGHT/2, 0, 1, WALL_HEIGHT, ROOM_SIZE),
+                createWall(0, WALL_HEIGHT/2, -ROOM_SIZE/2, ROOM_SIZE, WALL_HEIGHT, 1),
+                createWall(0, WALL_HEIGHT/2, ROOM_SIZE/2, ROOM_SIZE, WALL_HEIGHT, 1)
+            ];
+
+            walls.forEach(wall => {
+                wall.castShadow = true;
+                wall.receiveShadow = true;
+                room.add(wall);
+            });
+
+            scene.add(room);
+            rooms.push(room);
+        }
+
+        function createBoundaryWalls() {
+            const walls = [
+                createWall(0, WALL_HEIGHT/2, -MAP_SIZE/2, MAP_SIZE, WALL_HEIGHT, 1),
+                createWall(0, WALL_HEIGHT/2, MAP_SIZE/2, MAP_SIZE, WALL_HEIGHT, 1),
+                createWall(-MAP_SIZE/2, WALL_HEIGHT/2, 0, 1, WALL_HEIGHT, MAP_SIZE),
+                createWall(MAP_SIZE/2, WALL_HEIGHT/2, 0, 1, WALL_HEIGHT, MAP_SIZE)
+            ];
+
+            walls.forEach(wall => {
+                wall.castShadow = true;
+                wall.receiveShadow = true;
+            });
+        }
+
+        function createWall(x, y, z, width, height, depth) {
+            const geometry = new THREE.BoxGeometry(width, height, depth);
+            const material = new THREE.MeshPhongMaterial({ color: 0x808080 });
+            const wall = new THREE.Mesh(geometry, material);
+            wall.position.set(x, y, z);
+            scene.add(wall);
+            walls.push(wall);
+            return wall;
+        }
+
+        function spawnInitialEntities() {
+            for (let i = 0; i < 3; i++) {
+                createTarget();
+                createEnemy(ENEMY_TYPES.SHOOTER);
+                createEnemy(ENEMY_TYPES.RUSHER);
+                if (i < 1) createEnemy(ENEMY_TYPES.TANK);
+            }
+        }
+
+        function createEnemy(type) {
+            const enemy = new THREE.Group();
+            
+            let color;
+            switch(type) {
+                case ENEMY_TYPES.SHOOTER:
+                    color = 0xff0000;
+                    enemy.shootCooldown = 2000;
+                    enemy.speed = 0.05;
+                    enemy.health = 100;
+                    break;
+                case ENEMY_TYPES.RUSHER:
+                    color = 0x00ff00;
+                    enemy.speed = 0.15;
+                    enemy.health = 40;
+                    break;
+                case ENEMY_TYPES.TANK:
+                    color = 0x0000ff;
+                    enemy.speed = 0.03;
+                    enemy.health = 200;
+                    break;
+            }
+
+            const bodyGeometry = new THREE.CylinderGeometry(0.5, 0.5, 2, 8);
+            const bodyMaterial = new THREE.MeshPhongMaterial({ color });
+            const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+            
+            const headGeometry = new THREE.SphereGeometry(0.5, 8, 8);
+            const headMaterial = new THREE.MeshPhongMaterial({ color });
+            const head = new THREE.Mesh(headGeometry, headMaterial);
+            head.position.y = 1.25;
+            
+            enemy.add(body);
+            enemy.add(head);
+            
+            do {
+                enemy.position.x = Math.random() * (MAP_SIZE - 20) - (MAP_SIZE/2 - 10);
+                enemy.position.z = Math.random() * (MAP_SIZE - 20) - (MAP_SIZE/2 - 10);
+            } while (new THREE.Vector3().distanceTo(enemy.position) < 20);
+            
+            enemy.position.y = 1.5;
+            enemy.type = type;
+            enemy.lastShot = Date.now();
+            
+            createHealthBar(enemy);
+            
+            scene.add(enemy);
+            enemies.push(enemy);
+        }
+
+        function createHealthBar(parent) {
+            const healthBarGroup = new THREE.Group();
+            healthBarGroup.name = 'healthBarGroup';
+            
+            const bgGeometry = new THREE.PlaneGeometry(2, 0.2);
+            const bgMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.5 });
+            const bgMesh = new THREE.Mesh(bgGeometry, bgMaterial);
+            bgMesh.name = 'healthBarBackground';
+            
+            const fgGeometry = new THREE.PlaneGeometry(2, 0.2);
+            const fgMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
+            const fgMesh = new THREE.Mesh(fgGeometry, fgMaterial);
+            fgMesh.name = 'healthBarForeground';
+            
+            healthBarGroup.add(bgMesh);
+            healthBarGroup.add(fgMesh);
+            healthBarGroup.position.y = 2;
+            
+            parent.add(healthBarGroup);
+            return healthBarGroup;
+        }
+
+        function createTarget() {
+            const geometry = new THREE.BoxGeometry(1, 1, 1);
+            const material = new THREE.MeshPhongMaterial({ color: 0xff0000 });
+            const target = new THREE.Mesh(geometry, material);
+            
+            do {
+                target.position.x = Math.random() * (MAP_SIZE - 20) - (MAP_SIZE/2 - 10);
+                target.position.y = Math.random() * 5 + 1;
+                target.position.z = Math.random() * (MAP_SIZE - 20) - (MAP_SIZE/2 - 10);
+            } while (isPositionInWall(target.position));
+            
+            scene.add(target);
+            targets.push(target);
+        }
+
+        function isPositionInWall(position) {
+            for (const wall of walls) {
+                const boundingBox = new THREE.Box3().setFromObject(wall);
+                if (boundingBox.containsPoint(position)) return true;
+            }
+            return false;
+        }
+
+        function setupControls() {
+            const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+            const PI_2 = Math.PI / 2;
+            let mouseSensitivity = 0.002;
+
+            document.addEventListener('mousemove', function(event) {
+                if (paused) return;
+
+                euler.setFromQuaternion(camera.quaternion);
+                euler.y -= event.movementX * mouseSensitivity;
+                euler.x -= event.movementY * mouseSensitivity;
+                euler.x = Math.max(-PI_2, Math.min(PI_2, euler.x));
+                camera.quaternion.setFromEuler(euler);
+            });
+        }
+
+        function shoot() {
+            if (!canShoot || paused) return;
+
+            const bulletGeometry = new THREE.SphereGeometry(0.1, 8, 8);
+            const bulletMaterial = new THREE.MeshPhongMaterial({ color: 0xffff00 });
+            const bullet = new THREE.Mesh(bulletGeometry, bulletMaterial);
+            
+            // Position bullet at camera position
+            bullet.position.copy(camera.position);
+            
+            // Get shooting direction from camera
+            const direction = new THREE.Vector3(0, 0, -1);
+            direction.applyQuaternion(camera.quaternion);
+            bullet.direction = direction;
+            bullet.createdAt = Date.now();
+            bullet.isPlayerBullet = true;
+
+            scene.add(bullet);
+            bullets.push(bullet);
+
+            // Bullet cooldown based on score
+            const cooldown = Math.max(100, 500 - Math.floor(score / 1000) * 50);
+            canShoot = false;
+            setTimeout(() => canShoot = true, cooldown);
+        }
+
+        function enemyShoot(enemy) {
+            const bulletGeometry = new THREE.SphereGeometry(0.1, 8, 8);
+            const bulletMaterial = new THREE.MeshPhongMaterial({ color: 0xff0000 });
+            const bullet = new THREE.Mesh(bulletGeometry, bulletMaterial);
+            
+            bullet.position.copy(enemy.position);
+            
+            const direction = new THREE.Vector3();
+            direction.subVectors(camera.position, enemy.position).normalize();
+            bullet.direction = direction;
+            bullet.createdAt = Date.now();
+
+            scene.add(bullet);
+            enemyBullets.push(bullet);
+        }
+
+        function updateEnemies() {
+            const currentTime = Date.now();
+            
+            enemies.forEach(enemy => {
+                const direction = new THREE.Vector3();
+                direction.subVectors(camera.position, enemy.position);
+                direction.y = 0;
+                direction.normalize();
+
+                // Check for wall collisions before moving
+                const nextPosition = enemy.position.clone().add(direction.multiplyScalar(enemy.speed));
+                if (!isPositionInWall(nextPosition)) {
+                    enemy.position.copy(nextPosition);
+                }
+
+                enemy.lookAt(camera.position);
+
+                // Enemy type specific behavior
+                switch(enemy.type) {
+                    case ENEMY_TYPES.SHOOTER:
+                        if (currentTime - enemy.lastShot > enemy.shootCooldown) {
+                            enemyShoot(enemy);
+                            enemy.lastShot = currentTime;
+                        }
+                        break;
+                    case ENEMY_TYPES.RUSHER:
+                        if (enemy.position.distanceTo(camera.position) < 10) {
+                            enemy.speed = 0.3; // Sprint when close
+                        } else {
+                            enemy.speed = 0.15;
+                        }
+                        break;
+                }
+
+                // Damage player on collision
+                if (enemy.position.distanceTo(camera.position) < 2) {
+                    const damage = enemy.type === ENEMY_TYPES.TANK ? 2 : 1;
+                    health -= damage;
+                    updateHealth();
+                }
+
+                // Update health bar billboarding
+                const healthBar = enemy.getObjectByName('healthBarGroup');
+                if (healthBar) {
+                    healthBar.lookAt(camera.position);
+                }
+            });
+        }
+
+        function updateBullets() {
+            const currentTime = Date.now();
+
+            // Player bullets
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                const bullet = bullets[i];
+                bullet.position.add(bullet.direction.multiplyScalar(BULLET_SPEED));
+
+                // Check enemy hits
+                enemies.forEach(enemy => {
+                    if (bullet.position.distanceTo(enemy.position) < 1) {
+                        const damage = 34;
+                        enemy.health -= damage;
+                        updateEnemyHealth(enemy);
+                        
+                        if (enemy.health <= 0) {
+                            scene.remove(enemy);
+                            enemies = enemies.filter(e => e !== enemy);
+                            score += enemy.type === ENEMY_TYPES.TANK ? 300 : 200;
+                            updateScore();
+                            createEnemy(enemy.type);
+                        }
+
+                        scene.remove(bullet);
+                        bullets.splice(i, 1);
+                    }
+                });
+
+                // Check target hits
+                targets.forEach(target => {
+                    if (bullet.position.distanceTo(target.position) < 1) {
+                        scene.remove(target);
+                        targets = targets.filter(t => t !== target);
+                        score += 100;
+                        updateScore();
+                        createTarget();
+                        
+                        scene.remove(bullet);
+                        bullets.splice(i, 1);
+                    }
+                });
+
+                // Remove old bullets
+                if (currentTime - bullet.createdAt > BULLET_LIFETIME) {
+                    scene.remove(bullet);
+                    bullets.splice(i, 1);
+                }
+            }
+
+            // Enemy bullets
+            for (let i = enemyBullets.length - 1; i >= 0; i--) {
+                const bullet = enemyBullets[i];
+                bullet.position.add(bullet.direction.multiplyScalar(BULLET_SPEED));
+
+                // Check player hits
+                if (bullet.position.distanceTo(camera.position) < 1) {
+                    health -= 10;
+                    updateHealth();
+                    scene.remove(bullet);
+                    enemyBullets.splice(i, 1);
+                }
+
+                // Remove old bullets
+                if (currentTime - bullet.createdAt > BULLET_LIFETIME) {
+                    scene.remove(bullet);
+                    enemyBullets.splice(i, 1);
+                }
+            }
+        }
+
+        function updateHealth() {
+            document.getElementById('health').textContent = `Health: ${health}`;
+            
+            if (health <= 0) {
+                paused = true;
+                document.getElementById('instructions').textContent = 'Game Over! Refresh to restart';
+                document.getElementById('instructions').style.display = 'block';
+                document.exitPointerLock();
+            }
+        }
+
+        function updateScore() {
+            document.getElementById('score').textContent = `Score: ${score}`;
+            
+            // Level up every 1000 points
+            const newLevel = Math.floor(score / 1000) + 1;
+            if (newLevel > level) {
+                level = newLevel;
+                document.getElementById('level').textContent = `Level: ${level}`;
+            }
+        }
+
+        function updateEnemyHealth(enemy) {
+            const healthBar = enemy.getObjectByName('healthBarGroup');
+            if (healthBar) {
+                const fgMesh = healthBar.getObjectByName('healthBarForeground');
+                const maxHealth = enemy.type === ENEMY_TYPES.TANK ? 200 : 100;
+                fgMesh.scale.x = enemy.health / maxHealth;
+            }
+        }
+
+        function checkCollision(position) {
+            for (const wall of walls) {
+                const boundingBox = new THREE.Box3().setFromObject(wall);
+                boundingBox.expandByScalar(1); // Add some padding
+                if (boundingBox.containsPoint(position)) return true;
+            }
+            return false;
+        }
+
+        function startSlide() {
+            if (!isSliding && !slideCooldown && (moveForward || moveBackward || moveLeft || moveRight) && canJump) {
+                isSliding = true;
+                slideCooldown = true;
+                slideTime = Date.now();
+                document.getElementById('slide').textContent = 'Sliding...';
+
+                // Calculate slide direction from current movement and camera orientation
+                slideDirection.set(
+                    moveRight ? 1 : moveLeft ? -1 : 0,
+                    0,
+                    moveForward ? -1 : moveBackward ? 1 : 0
+                );
+                slideDirection.normalize();
+                slideDirection.applyQuaternion(camera.quaternion);
+
+                // Set initial slide speed based on current movement speed
+                slideStartSpeed = isSprinting ? SLIDE_INITIAL_SPEED * 1.2 : SLIDE_INITIAL_SPEED;
+                slideVelocity.copy(slideDirection).multiplyScalar(slideStartSpeed);
+
+                // Lower camera during slide
+                camera.position.y -= 0.5;
+
+                // Reset slide cooldown
+                setTimeout(() => {
+                    slideCooldown = false;
+                    document.getElementById('slide').textContent = 'Slide Ready';
+                }, SLIDE_COOLDOWN);
+            }
+        }
+
+        function updateSlide() {
+            if (isSliding) {
+                const currentTime = Date.now();
+                const slideDuration = currentTime - slideTime;
+                
+                if (slideDuration >= SLIDE_DURATION) {
+                    // End slide if duration exceeded
+                    isSliding = false;
+                    camera.position.y += 0.5; // Reset camera height
+                    return;
+                }
+
+                // Calculate current slide speed with smooth deceleration
+                const progress = slideDuration / SLIDE_DURATION;
+                const currentSpeed = Math.max(
+                    SLIDE_MIN_SPEED,
+                    slideStartSpeed * (1 - progress) - SLIDE_DECELERATION * slideDuration
+                );
+
+                slideVelocity.copy(slideDirection).multiplyScalar(currentSpeed);
+
+                // Apply slide movement with collision check
+                const newPosition = camera.position.clone().add(slideVelocity);
+                if (!checkCollision(newPosition)) {
+                    camera.position.copy(newPosition);
+                } else {
+                    // End slide if we hit a wall
+                    isSliding = false;
+                    camera.position.y += 0.5;
+                }
+            }
+        }
+
+        function update() {
+            if (!paused) {
+                // Apply gravity
+                velocity.y += GRAVITY * 0.016; // Multiply by delta time
+                const newPosition = camera.position.clone();
+                newPosition.y += velocity.y;
+
+                // Ground collision
+                if (newPosition.y < 2) {
+                    velocity.y = 0;
+                    newPosition.y = 2;
+                    canJump = true;
+                    if (isSliding) {
+                        slideVelocity.multiplyScalar(SLIDE_FRICTION);
+                        if (slideVelocity.length() < 0.01) {
+                            isSliding = false;
+                            document.getElementById('slide').textContent = 'Slide Ready';
+                        }
+                    }
+                }
+
+                camera.position.copy(newPosition);
+
+                // Movement
+                const speed = isSprinting ? SPRINT_SPEED : WALK_SPEED;
+                const movement = new THREE.Vector3();
+
+                if (!isSliding) {
+                    if (moveForward || moveBackward) {
+                        movement.z = moveForward ? -speed : speed;
+                    }
+                    if (moveLeft || moveRight) {
+                        movement.x = moveLeft ? -speed : speed;
+                    }
+
+                    if (movement.length() > 0) {
+                        movement.applyQuaternion(camera.quaternion);
+                        movement.y = 0;
+                        const newPosition = camera.position.clone().add(movement);
+                        
+                        if (!checkCollision(newPosition)) {
+                            camera.position.copy(newPosition);
+                        }
+                    }
+                } else {
+                    // Apply slide movement
+                    const slideMovement = slideVelocity.clone();
+                    const newPosition = camera.position.clone().add(slideMovement);
+                    
+                    if (!checkCollision(newPosition)) {
+                        camera.position.copy(newPosition);
+                    } else {
+                        isSliding = false;
+                        document.getElementById('slide').textContent = 'Slide Ready';
+                    }
+                }
+
+                updateEnemies();
+                updateBullets();
+
+                // Rotate targets
+                targets.forEach(target => {
+                    target.rotation.y += 0.01;
+                });
+            }
+        }
+
+        function handleEnemyHit(enemy, bullet, bulletIndex) {
+            const damage = 34;
+            enemy.health -= damage;
+            updateEnemyHealth(enemy);
+            
+            if (enemy.health <= 0) {
+                scene.remove(enemy);
+                enemies = enemies.filter(e => e !== enemy);
+                score += enemy.type === ENEMY_TYPES.TANK ? 300 : 200;
+                updateScore();
+                createEnemy(enemy.type);
+            }
+
+            scene.remove(bullet);
+            bullets.splice(bulletIndex, 1);
+        }
+
+        function handleTargetHit(target, bullet, bulletIndex) {
+            scene.remove(target);
+            targets = targets.filter(t => t !== target);
+            score += 100;
+            updateScore();
+            createTarget();
+            
+            scene.remove(bullet);
+            bullets.splice(bulletIndex, 1);
+        }
+
+        function handlePlayerHit(bullet, bulletIndex) {
+            health -= 10;
+            updateHealth();
+            scene.remove(bullet);
+            bullets.splice(bulletIndex, 1);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            update();
+            renderer.render(scene, camera);
+        }
+
+        function startGame() {
+            if (paused) {
+                paused = false;
+                document.getElementById('instructions').style.display = 'none';
+                document.body.requestPointerLock();
+            }
+        }
+
+        function onMouseDown() {
+            shoot();
+        }
+
+        function onKeyDown(event) {
+            if (paused) return;
+            
+            switch (event.code) {
+                case 'KeyW': moveForward = true; break;
+                case 'KeyS': moveBackward = true; break;
+                case 'KeyA': moveLeft = true; break;
+                case 'KeyD': moveRight = true; break;
+                case 'Space': 
+                    if (canJump) {
+                        velocity.y = JUMP_FORCE;
+                        canJump = false;
+                    }
+                    break;
+                case 'KeyC': startSlide(); break;
+                case 'ShiftLeft': isSprinting = true; break;
+                case 'Escape':
+                    paused = true;
+                    document.getElementById('instructions').style.display = 'block';
+                    document.exitPointerLock();
+                    break;
+            }
+        }
+
+        function onKeyUp(event) {
+            switch (event.code) {
+                case 'KeyW': moveForward = false; break;
+                case 'KeyS': moveBackward = false; break;
+                case 'KeyA': moveLeft = false; break;
+                case 'KeyD': moveRight = false; break;
+                case 'ShiftLeft': isSprinting = false; break;
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        init();
+        animate();
+    </script>
+</body>
+</html>
