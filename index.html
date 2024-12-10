@@ -36,6 +36,13 @@
             color: white;
             font-family: Arial;
         }
+        #slide {
+            position: fixed;
+            top: 110px;
+            left: 20px;
+            color: white;
+            font-family: Arial;
+        }
         #instructions {
             position: fixed;
             top: 50%;
@@ -76,6 +83,7 @@
         let canJump = true;
         let isSprinting = false;
         let isSliding = false;
+        let slideStartTime = 0;
         let slideVelocity = new THREE.Vector3();
         let slideDirection = new THREE.Vector3();
         let slideCooldown = false;
@@ -98,8 +106,12 @@
         const WALK_SPEED = 0.15;
         const SPRINT_SPEED = 0.3;
         const SLIDE_SPEED = 0.4;
+        const SLIDE_DURATION = 1000; // ms
         const SLIDE_FRICTION = 0.95;
         const SLIDE_COOLDOWN = 1500; // ms
+        const SLIDE_INITIAL_SPEED = 0.5;
+        const SLIDE_MIN_SPEED = 0.05;
+        const SLIDE_DECELERATION = 0.0005;
         const MAP_SIZE = 100;
         const WALL_HEIGHT = 10;
         const ROOM_SIZE = 20;
@@ -111,6 +123,7 @@
             RUSHER: 'rusher',
             TANK: 'tank'
         };
+
 
         function init() {
             scene = new THREE.Scene();
@@ -468,45 +481,42 @@
 
         function updateBullets() {
             const currentTime = Date.now();
+            const bulletRadius = 0.1;
 
-            // Player bullets
+            // Update player bullets
             for (let i = bullets.length - 1; i >= 0; i--) {
                 const bullet = bullets[i];
-                bullet.position.add(bullet.direction.multiplyScalar(BULLET_SPEED));
+                const oldPosition = bullet.position.clone();
+                const newPosition = oldPosition.clone().add(bullet.direction.multiplyScalar(BULLET_SPEED));
+
+                // Check wall collisions
+                const raycaster = new THREE.Raycaster(oldPosition, bullet.direction, 0, BULLET_SPEED);
+                const wallIntersects = raycaster.intersectObjects(walls);
+
+                if (wallIntersects.length > 0) {
+                    scene.remove(bullet);
+                    bullets.splice(i, 1);
+                    continue;
+                }
+
+                // Update bullet position if no wall collision
+                bullet.position.copy(newPosition);
 
                 // Check enemy hits
-                enemies.forEach(enemy => {
+                for (const enemy of enemies) {
                     if (bullet.position.distanceTo(enemy.position) < 1) {
-                        const damage = 34;
-                        enemy.health -= damage;
-                        updateEnemyHealth(enemy);
-                        
-                        if (enemy.health <= 0) {
-                            scene.remove(enemy);
-                            enemies = enemies.filter(e => e !== enemy);
-                            score += enemy.type === ENEMY_TYPES.TANK ? 300 : 200;
-                            updateScore();
-                            createEnemy(enemy.type);
-                        }
-
-                        scene.remove(bullet);
-                        bullets.splice(i, 1);
+                        handleEnemyHit(enemy, bullet, i);
+                        break;
                     }
-                });
+                }
 
                 // Check target hits
-                targets.forEach(target => {
+                for (const target of targets) {
                     if (bullet.position.distanceTo(target.position) < 1) {
-                        scene.remove(target);
-                        targets = targets.filter(t => t !== target);
-                        score += 100;
-                        updateScore();
-                        createTarget();
-                        
-                        scene.remove(bullet);
-                        bullets.splice(i, 1);
+                        handleTargetHit(target, bullet, i);
+                        break;
                     }
-                });
+                }
 
                 // Remove old bullets
                 if (currentTime - bullet.createdAt > BULLET_LIFETIME) {
@@ -515,17 +525,28 @@
                 }
             }
 
-            // Enemy bullets
+            // Update enemy bullets with similar collision detection
             for (let i = enemyBullets.length - 1; i >= 0; i--) {
                 const bullet = enemyBullets[i];
-                bullet.position.add(bullet.direction.multiplyScalar(BULLET_SPEED));
+                const oldPosition = bullet.position.clone();
+                const newPosition = oldPosition.clone().add(bullet.direction.multiplyScalar(BULLET_SPEED));
+
+                // Check wall collisions
+                const raycaster = new THREE.Raycaster(oldPosition, bullet.direction, 0, BULLET_SPEED);
+                const wallIntersects = raycaster.intersectObjects(walls);
+
+                if (wallIntersects.length > 0) {
+                    scene.remove(bullet);
+                    enemyBullets.splice(i, 1);
+                    continue;
+                }
+
+                // Update bullet position if no wall collision
+                bullet.position.copy(newPosition);
 
                 // Check player hits
                 if (bullet.position.distanceTo(camera.position) < 1) {
-                    health -= 10;
-                    updateHealth();
-                    scene.remove(bullet);
-                    enemyBullets.splice(i, 1);
+                    handlePlayerHit(bullet, i);
                 }
 
                 // Remove old bullets
@@ -580,7 +601,7 @@
             if (!isSliding && !slideCooldown && (moveForward || moveBackward || moveLeft || moveRight) && canJump) {
                 isSliding = true;
                 slideCooldown = true;
-                slideTime = Date.now();
+                slideStartTime = Date.now();
                 document.getElementById('slide').textContent = 'Sliding...';
 
                 // Calculate slide direction from current movement and camera orientation
@@ -592,9 +613,8 @@
                 slideDirection.normalize();
                 slideDirection.applyQuaternion(camera.quaternion);
 
-                // Set initial slide speed based on current movement speed
-                slideStartSpeed = isSprinting ? SLIDE_INITIAL_SPEED * 1.2 : SLIDE_INITIAL_SPEED;
-                slideVelocity.copy(slideDirection).multiplyScalar(slideStartSpeed);
+                // Set initial slide velocity
+                slideVelocity.copy(slideDirection).multiplyScalar(SLIDE_INITIAL_SPEED);
 
                 // Lower camera during slide
                 camera.position.y -= 0.5;
@@ -606,6 +626,7 @@
                 }, SLIDE_COOLDOWN);
             }
         }
+
 
         function updateSlide() {
             if (isSliding) {
@@ -643,7 +664,7 @@
         function update() {
             if (!paused) {
                 // Apply gravity
-                velocity.y += GRAVITY * 0.016; // Multiply by delta time
+                velocity.y += GRAVITY * 0.016;
                 const newPosition = camera.position.clone();
                 newPosition.y += velocity.y;
 
@@ -652,22 +673,44 @@
                     velocity.y = 0;
                     newPosition.y = 2;
                     canJump = true;
-                    if (isSliding) {
-                        slideVelocity.multiplyScalar(SLIDE_FRICTION);
-                        if (slideVelocity.length() < 0.01) {
-                            isSliding = false;
-                            document.getElementById('slide').textContent = 'Slide Ready';
-                        }
-                    }
                 }
 
                 camera.position.copy(newPosition);
 
-                // Movement
-                const speed = isSprinting ? SPRINT_SPEED : WALK_SPEED;
-                const movement = new THREE.Vector3();
+                // Handle sliding
+                if (isSliding) {
+                    const currentTime = Date.now();
+                    const slideDuration = currentTime - slideStartTime;
 
-                if (!isSliding) {
+                    if (slideDuration >= SLIDE_DURATION) {
+                        // End slide
+                        isSliding = false;
+                        camera.position.y += 0.5;
+                    } else {
+                        // Calculate current slide speed with smooth deceleration
+                        const progress = slideDuration / SLIDE_DURATION;
+                        const currentSpeed = Math.max(
+                            SLIDE_MIN_SPEED,
+                            SLIDE_INITIAL_SPEED * (1 - progress)
+                        );
+
+                        // Apply slide movement with collision check
+                        slideVelocity.copy(slideDirection).multiplyScalar(currentSpeed);
+                        const slideNewPosition = camera.position.clone().add(slideVelocity);
+
+                        if (!checkCollision(slideNewPosition)) {
+                            camera.position.copy(slideNewPosition);
+                        } else {
+                            // End slide if we hit a wall
+                            isSliding = false;
+                            camera.position.y += 0.5;
+                        }
+                    }
+                } else {
+                    // Normal movement
+                    const speed = isSprinting ? SPRINT_SPEED : WALK_SPEED;
+                    const movement = new THREE.Vector3();
+
                     if (moveForward || moveBackward) {
                         movement.z = moveForward ? -speed : speed;
                     }
@@ -679,21 +722,10 @@
                         movement.applyQuaternion(camera.quaternion);
                         movement.y = 0;
                         const newPosition = camera.position.clone().add(movement);
-                        
+
                         if (!checkCollision(newPosition)) {
                             camera.position.copy(newPosition);
                         }
-                    }
-                } else {
-                    // Apply slide movement
-                    const slideMovement = slideVelocity.clone();
-                    const newPosition = camera.position.clone().add(slideMovement);
-                    
-                    if (!checkCollision(newPosition)) {
-                        camera.position.copy(newPosition);
-                    } else {
-                        isSliding = false;
-                        document.getElementById('slide').textContent = 'Slide Ready';
                     }
                 }
 
